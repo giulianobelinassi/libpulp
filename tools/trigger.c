@@ -20,6 +20,7 @@
  */
 
 #include <argp.h>
+#include <assert.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -37,6 +38,85 @@
 #include "trigger.h"
 #include "ulp_common.h"
 
+#define BUFFER_SIZE 4096
+#define TRIGGERLOCK_ATTEMPTS 5
+
+bool
+is_number(const char *str)
+{
+  if (!str)
+    return false;
+
+  do {
+    if (!isdigit(*str++))
+      return false;
+  }
+  while (*str != '\0');
+  return true;
+}
+
+static long
+get_btime()
+{
+  char buffer[BUFFER_SIZE];
+  FILE *proc_stat;
+  long ret = 0;
+
+  proc_stat = fopen("/proc/stat", "r");
+  if (!proc_stat) {
+    FATAL("Unable to read /proc/stat");
+  }
+
+  while (fgets(buffer, BUFFER_SIZE, proc_stat)) {
+    char *label = strtok(buffer, " ");
+    if (!label)
+      continue;
+
+    if (!strncmp(label, "btime", BUFFER_SIZE)) {
+      char *btime_str = strtok(NULL, "\n");
+      if (is_number(btime_str)) {
+        ret = atol(btime_str);
+        break;
+      }
+    }
+  }
+
+  return ret;
+}
+
+static int triggerlock_fd = -1;
+static char lockfile[128];
+
+static bool
+triggerlock_acquire(void)
+{
+  int written = snprintf(lockfile, 128, "/tmp/ulp.trigger.%ld", get_btime());
+
+  assert(written < 128);
+
+  int fd = open(lockfile, O_CREAT | O_EXCL);
+
+  if (fd < 0) {
+    return false;
+  }
+
+  triggerlock_fd = fd;
+  return true;
+}
+
+static bool
+triggerlock_release(void)
+{
+  if (triggerlock_fd > 0) {
+    close(triggerlock_fd);
+    remove(lockfile);
+    triggerlock_fd = -1;
+    return true;
+  }
+
+  return false;
+}
+
 int
 run_trigger(struct arguments *arguments)
 {
@@ -45,6 +125,7 @@ run_trigger(struct arguments *arguments)
   int result;
   int ret;
   int retry;
+  int i;
 
   struct ulp_process *target = calloc(1, sizeof(struct ulp_process));
 
@@ -71,6 +152,17 @@ run_trigger(struct arguments *arguments)
   if (livepatch && check_patch_sanity(target)) {
     WARN("error checking live patch sanity.");
     ret = 1;
+    goto target_clean;
+  }
+
+  for (i = 0; i < TRIGGERLOCK_ATTEMPTS; i++) {
+    if (triggerlock_acquire()) {
+      break;
+    }
+    sleep(1);
+  }
+  if (i == TRIGGERLOCK_ATTEMPTS) {
+    WARN("Unable to acquire trigger lock");
     goto target_clean;
   }
 
@@ -155,6 +247,7 @@ run_trigger(struct arguments *arguments)
   ret = 0;
 
 target_clean:
+  triggerlock_release();
   release_ulp_process(target);
   return ret;
 }
