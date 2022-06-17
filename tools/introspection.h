@@ -44,9 +44,6 @@ struct ulp_process
   int pid;
   bool all_threads_hijacked;
 
-  Elf64_Addr load_bias;
-  Elf64_Addr dyn_addr;
-
   struct ulp_thread *threads;
   struct ulp_thread *main_thread;
 

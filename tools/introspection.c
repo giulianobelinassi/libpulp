@@ -340,52 +340,6 @@ dynobj_next(struct ulp_process *process, struct ulp_dynobj *curr_obj)
   }
 }
 
-/* Parses the _DYNAMIC section of PROCESS, finds the DT_DEBUG entry,
- * from which the address of the chain of dynamically loaded objects
- * (link map) can be found, then reads it and stores it in PROCESS.
- */
-int
-dig_main_link_map(struct ulp_process *process)
-{
-  Elf64_Addr dyn_addr = 0, link_map, link_map_addr, r_debug = 0;
-  int r_map_offset;
-  ElfW(Dyn) dyn;
-
-  dyn_addr = process->dyn_addr;
-
-  while (1) {
-    if (read_memory((char *)&dyn, sizeof(ElfW(Dyn)), process->pid, dyn_addr)) {
-      DEBUG("error reading _DYNAMIC array.");
-      return ETARGETHOOK;
-    }
-    if (dyn.d_tag == DT_NULL) {
-      DEBUG("error searching for r_debug.");
-      return ENODEBUGTAG;
-    }
-    if (dyn.d_tag == DT_DEBUG) {
-      r_debug = dyn.d_un.d_ptr;
-      break;
-    }
-    dyn_addr = dyn_addr + sizeof(ElfW(Dyn));
-  }
-  r_map_offset = offsetof(struct r_debug, r_map);
-  link_map_addr = r_debug + r_map_offset;
-
-  if (read_memory((char *)&link_map, sizeof(void *), process->pid,
-                  link_map_addr)) {
-    DEBUG("error reading link_map address.");
-    return ETARGETHOOK;
-  }
-
-  if (read_memory((char *)&process->dynobj_main->link_map,
-                  sizeof(struct link_map), process->pid, link_map)) {
-    DEBUG("error reading link_map data.");
-    return ETARGETHOOK;
-  }
-
-  return 0;
-}
-
 /* Get symbol by its name, but with extra complexity of reading it in a remote
  * process.
  */
@@ -455,16 +409,14 @@ parse_dynobj_elf_headers(int pid, struct ulp_dynobj *obj)
 
   ElfW(Addr) buildid_addr = 0;
 
+  ElfW(Addr) r_debug = 0;
+  ElfW(Addr) link_map_addr = 0;
+  ElfW(Addr) link_map = 0;
+
   ElfW(Word) name_len = 0;
   ElfW(Word) buildid_len = 0;
 
   int i, num_symbols = 0, ret;
-
-  /* If object has no link map attached to it, there is nothing we can do.  */
-  if (!obj->link_map.l_name) {
-    DEBUG("no link map object found");
-    return ENOLINKMAP;
-  }
 
   /* l_addr holds the pointer to the ELF header.  */
   ehdr_addr = obj->link_map.l_addr;
@@ -541,6 +493,10 @@ parse_dynobj_elf_headers(int pid, struct ulp_dynobj *obj)
             if (!hash_addr)
               DEBUG("hash section found, but is empty");
             break;
+
+          case DT_DEBUG:
+            r_debug = dyn.d_un.d_ptr;
+          break;
         }
         dyn_addr += sizeof(dyn);
       }
@@ -622,6 +578,24 @@ parse_dynobj_elf_headers(int pid, struct ulp_dynobj *obj)
   }
   else {
     DEBUG("hash table not found in %s", obj->filename);
+  }
+
+  if (r_debug) {
+    /* We are after the struct link_map of the process.  */
+    int r_map_offset = offsetof(struct r_debug, r_map);
+    link_map_addr = r_debug + r_map_offset;
+
+    if (read_memory((char *)&link_map, sizeof(void *), pid, link_map_addr)) {
+      DEBUG("error reading link_map address.");
+      return ETARGETHOOK;
+    }
+
+    if (read_memory((char *)&obj->link_map, sizeof(struct link_map), pid, link_map)) {
+      DEBUG("error reading link_map data.");
+      return ETARGETHOOK;
+    }
+  } else {
+    DEBUG("r_debug not found in %s", obj->filename);
   }
 
   /* Finally store found address to the dynobj object.  */
@@ -754,89 +728,6 @@ get_loaded_symbol_addr_from_disk(struct ulp_dynobj *obj, const char *sym)
   return sym_addr;
 }
 
-/* Calculates the load bias of PROCESS, i.e. the difference between the
- * adress of _start in the elf file and in memory. Returns 0 on success.
- */
-int
-dig_load_bias(struct ulp_process *process)
-{
-  int auxv, i;
-  char *format_str, *filename;
-  Elf64_auxv_t at;
-  uint64_t addrof_entry = 0;
-  uint64_t at_phdr = 0;
-  uint64_t pt_phdr = 0;
-  uint64_t adyn = 0;
-  int phent = 0, phnum = 0;
-  Elf64_Phdr phdr;
-
-  format_str = "/proc/%d/auxv";
-  filename = calloc(strlen(format_str) + 10, 1);
-  sprintf(filename, format_str, process->pid);
-
-  auxv = open(filename, O_RDONLY);
-  if (!auxv) {
-    DEBUG("error: unable to open auxv.");
-    return ENOENT;
-  }
-
-  do {
-    if (read(auxv, &at, sizeof(Elf64_auxv_t)) != sizeof(Elf64_auxv_t)) {
-      DEBUG("error: unable to read auxv.");
-      return errno;
-    }
-    if (at.a_type == AT_ENTRY) {
-      addrof_entry = at.a_un.a_val;
-    }
-    else if (at.a_type == AT_PHDR) {
-      at_phdr = at.a_un.a_val;
-    }
-    else if (at.a_type == AT_PHNUM) {
-      phnum = at.a_un.a_val;
-    }
-    else if (at.a_type == AT_PHENT) {
-      phent = at.a_un.a_val;
-    }
-  }
-  while (at.a_type != AT_NULL);
-  if (addrof_entry == 0) {
-    DEBUG("error: unable to find entry address for the executable");
-    return ENOPENTRY;
-  }
-  if (at_phdr == 0) {
-    DEBUG("error: unable to find program header of target process");
-    return ENOPHDR;
-  }
-  if (phent != sizeof(phdr)) {
-    DEBUG("error: invalid PHDR size for target process (32 bit process?)");
-    return ENOPHDR;
-  }
-  for (i = 0; i < phnum; i++) {
-    if (read_memory((char *)&phdr, phent, process->pid, at_phdr + i * phent)) {
-      DEBUG("error: unable to read PHDR entry");
-      return ETARGETHOOK;
-    }
-    switch (phdr.p_type) {
-      case PT_PHDR:
-        pt_phdr = phdr.p_vaddr;
-        break;
-      case PT_DYNAMIC:
-        adyn = phdr.p_vaddr;
-        break;
-    }
-  }
-
-  process->load_bias = 0;
-  if (pt_phdr) {
-    adyn += at_phdr - pt_phdr;
-    process->load_bias = at_phdr - pt_phdr;
-  }
-  process->dyn_addr = adyn;
-
-  free(filename);
-  return 0;
-}
-
 /* Collects information about the main executable of PROCESS. Collected
  * information includes: the program symtab, load bias, and address of
  * the chain of loaded objects. On success, returns 0.
@@ -845,7 +736,6 @@ int
 parse_main_dynobj(struct ulp_process *process)
 {
   struct ulp_dynobj *obj;
-  ulp_error_t ret = 0;
 
   DEBUG("getting in-memory information about the main executable.");
 
@@ -870,21 +760,6 @@ parse_main_dynobj(struct ulp_process *process)
   obj->next = NULL;
 
   process->dynobj_main = obj;
-
-  ret = dig_load_bias(process);
-  if (ret) {
-    WARN("unable to calculate the load bias for the executable: %s\n",
-         libpulp_strerror(ret));
-    return ret;
-  }
-
-  ret = dig_main_link_map(process);
-  if (ret) {
-    WARN("unable to parse the mappings of objects in memory: %s\n",
-         libpulp_strerror(ret));
-    return ret;
-  }
-
   parse_dynobj_elf_headers(process->pid, obj);
 
   return 0;
