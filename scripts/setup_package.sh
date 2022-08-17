@@ -286,7 +286,6 @@ print_help_message()
 parse_program_argv()
 {
   # If user didn't provide any arugment, then bails out with a help message.
-  echo "$@"
   if [[ -z "$@" ]]; then
     print_help_message
     exit 0
