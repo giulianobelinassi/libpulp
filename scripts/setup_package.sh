@@ -7,6 +7,7 @@ VERSION_REGEX="([0-9\.a-zA-Z]+-$SLE_VERSION_REGEX\.[0-9\.]+[0-9])"
 PLATFORM=
 URL=
 PACKAGE=
+NO_CLEANUP=0
 
 set_url_platform()
 {
@@ -220,6 +221,7 @@ extract_libs_from_package()
     mkdir -p src
     cd src
       rpm2cpio ../$src_package | cpio -idmv --quiet
+      tar xvf $(ls | grep .tar.gz$)
     cd ..
 
     # Extract tar file and get rid of the version directory.
@@ -278,6 +280,7 @@ print_help_message()
   echo "where <switches>"
   echo "  --platform PLATFORM            SLE version (ex 15-SP4)"
   echo "  --package  PACKAGE             Package name to download (ex glibc)"
+  echo "  --no-cleanup                   Do not cleanup downloaded .rpm files."
   echo ""
   echo "supported <library> so far are 'glibc' and 'libopenssl1_1'"
 }
@@ -300,6 +303,10 @@ parse_program_argv()
         ;;
       --package=*)
         PACKAGE="${i#*=}"
+        shift
+        ;;
+      --no-cleanup)
+        NO_CLEANUP=1
         shift
         ;;
       --help)
@@ -346,7 +353,9 @@ main()
   done
 
   # Delete all packages to cleanup.
-  #rm -f *.rpm *tar.xz
+  if [ $NO_CLEANUP -ne 1 ]; then
+    rm -f *.rpm *tar.xz
+  fi
   echo "Done."
 }
 

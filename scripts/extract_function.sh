@@ -17,6 +17,10 @@ BINARY=
 # Project to extract from
 PACKAGE_PATH=
 
+OUTPUT=
+
+IPA_CLONE=
+
 # Path to CCP-POL scripts
 P="$HOME/projects/kgr/scripts/ccp-pol"
 
@@ -30,10 +34,11 @@ set_project_cflags()
   local include_folder="-I$PACKAGE_PATH/src/openssl-1.1.1l/include
                         -I$PACKAGE_PATH/src/openssl-1.1.1l/"
 
+
   CCP_CFLAGS="-I/usr/include/
               -I/usr/include/bits/types/
-              -I/usr/lib64/gcc/x86_64-suse-linux/8/include/
-              -I/usr/lib64/gcc/x86_64-suse-linux/8/include-fixed
+              -I/usr/lib64/gcc/x86_64-suse-linux/7/include/
+              -I/usr/lib64/gcc/x86_64-suse-linux/7/include-fixed
               -Icrypto/include
               -Iinclude
               -I/usr/local/include
@@ -98,10 +103,6 @@ set_project_cflags()
 # Set the KCP variables used by the policy scripts.
 set_kcp_variables()
 {
-  local project_path="15-SP4/libopenssl1_1/1.1.1l-150400.7.7.1"
-  local bin_path="$project_path/binaries/usr/lib64/"
-  local ipa_clones_path="$project_path/ipa-clones/"
-
   export KCP_READELF=readelf
   export KCP_RENAME_PREFIX=klp
   export KCP_WORK_DIR=/tmp/kcp
@@ -109,7 +110,7 @@ set_kcp_variables()
   export KCP_KBUILD_ODIR=$PACKAGE_PATH
   export KCP_PATCHED_OBJ=$PACKAGE_PATH/$BINARY
   export KCP_UNPATCHED_OBJ=$PACKAGE_PATH/$BINARY
-  export KCP_IPA_CLONES_DUMP=$PACKAGE_PATH/ipa-clones/$SOURCE.000i.ipa-clones
+  export KCP_IPA_CLONES_DUMP=$PACKAGE_PATH/$IPA_CLONE
 }
 
 do_extract_function()
@@ -122,8 +123,8 @@ do_extract_function()
 
   set -o xtrace
   $CCP --compiler=$compiler_version \
-       -i $target_function \
-       -o "$output" \
+       -i $FUNCTION \
+       -o "$OUTPUT" \
        -- $CCP_CFLAGS $PACKAGE_PATH/$SOURCE
   set +o xtrace
   popd
@@ -137,9 +138,28 @@ print_help_message()
   echo ""
   echo "Usage: $PROGNAME <switches>"
   echo "where <switches>"
-  echo "  --function FUNCTION            Function to extract."
-  echo "  --package  PATH_TO_PROJECT     Path to project"
+  echo "  --function=FUNCTION            Function to extract."
+  echo "  --package=PATH_TO_PROJECT      Path to project."
+  echo "  --binary=PATH_TO_BINARY        Path to final .so file."
+  echo "  --source=PATH_TO_SOURCE        Path to .c file containing FUNCTION."
+  echo "  --output=PATH_TO_GENERATED_C   Path to output .c file."
   echo ""
+  echo "Example: "
+  echo "  ./extract_function.sh --function="SSL_load_client_CA_file" --package=15-SP4/libopenssl1_1/1.1.1l-150400.7.7.1 --binary="binaries/usr/lib64/libssl.so.1.1" --source="src/openssl-1.1.1l/ssl/ssl_cert.c" --ipa-clone=ipa-clones/ssl/ssl_cert.c.000i.ipa-clones --output=/tmp/lp.c"
+}
+
+sanitize_arguments()
+{
+  if [ ! -f $PACKAGE_PATH/$SOURCE ]; then
+    echo "ERROR: Source file $PACKAGE_PATH/$SOURCE" does not exist.
+    exit 1
+  fi
+
+  if [ ! -f $PACKAGE_PATH/$IPA_CLONE ]; then
+    echo "ERROR: Source file $PACKAGE_PATH/$SOURCE" does not exist.
+    exit 1
+  fi
+
 }
 
 parse_program_argv()
@@ -154,7 +174,7 @@ parse_program_argv()
   for i in "$@"; do
     case $i in
       --package=*)
-        PACKAGE_PATH="${i#*=}"
+        PACKAGE_PATH=$(realpath "${i#*=}")
         shift
         ;;
       --function=*)
@@ -165,8 +185,16 @@ parse_program_argv()
         BINARY="${i#*=}"
         shift
         ;;
-      --source=)
+      --source=*)
         SOURCE="${i#*=}"
+        shift
+        ;;
+      --ipa-clone=*)
+        IPA_CLONE="${i#*=}"
+        shift
+        ;;
+      --output=*)
+        OUTPUT="${i#*=}"
         shift
         ;;
       --help)
@@ -186,19 +214,15 @@ parse_program_argv()
     esac
   done
 
+  sanitize_arguments
 }
 
 main()
 {
-  FUNCTION="ssl3_read"
-  PACKAGE_PATH="$HOME/projects/libpulp/libpulp/scripts/15-SP4/libopenssl1_1/1.1.1l-150400.7.7.1"
-  BINARY="usr/lib64/libssl.so.1.1"
-  SOURCE="src/openssl-1.1.1l/ssl/ssl_lib.c"
-  IPA_CLONE="ipa-clones/ssl/ssl_lib.c.000i.ipa-clones"
+  parse_program_argv $*
+
   set_kcp_variables
   set_project_cflags
-
-  #parse_program_argv $*
 
   do_extract_function
 }
